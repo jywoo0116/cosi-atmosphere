@@ -272,7 +272,26 @@ class MakeMassModels:
             The actual volume will be a shell with the inner radius
             starting at the specified value, and a height equal to the spacing
             specified in the atmospheric model. 
+
+        The profile must start at zero and have uniformly spaced altitudes.
+        The watched altitude must be a grid point below the profile's top.
         """
+
+        # Check the grid before creating or overwriting a geometry file.
+        if (len(self.height) < 2 or not np.all(np.isfinite(self.height))
+                or self.height[0] != 0):
+            raise ValueError("Atmospheric altitudes must be finite and start at 0 km, with at least two grid points.")
+        spacing = np.diff(self.height)
+        if np.any(spacing <= 0) or not np.allclose(spacing, spacing[0], rtol=1e-8, atol=1e-10):
+            raise ValueError("Atmospheric altitudes must be strictly increasing and uniformly spaced.")
+        watch_indices = np.flatnonzero(self.height == watch_alt)
+        if len(watch_indices) != 1 or watch_indices[0] == len(self.height) - 1:
+            raise ValueError("Watched altitude must be a profile grid point below the top of the atmosphere.")
+        watch_index = int(watch_indices[0])
+        max_height = self.height[-1]
+        r_earth = 6.378e8 # cm
+        source_radius = r_earth + max_height * 1e5
+        shell_thickness = (max_height / (len(self.height) - 1)) * 1e5 # cm
 
         # Make mass model:
         f = open("atmosphere.geo","w")
@@ -282,9 +301,9 @@ class MakeMassModels:
         f.write("Name AtmoshpereModel\n\n")
 
         # Surrounding sphere:
-        # Radius set to 200 km + r_earth
+        # Place the source boundary at the top of the supplied atmosphere.
         f.write("# Surrounding sphere:\n")
-        f.write("SurroundingSphere 657800000.0 0 0 0 657800000.0\n")
+        f.write("SurroundingSphere %s 0 0 0 %s\n" % (source_radius, source_radius))
         f.write("ShowSurroundingSphere true\n\n")
 
         # World volume:
@@ -297,26 +316,6 @@ class MakeMassModels:
 
         # Materials:
         f.write("Include $(MEGALIB)/resource/examples/geomega/materials/Materials.geo\n\n")
-
-        # Get shell thickness from atmospheric profile.
-        # Note: Atmospheric profile must start from 0 km. 
-        max_height = np.amax(self.height)
-        n_values = len(self.height) - 1 # -1 since altitude starts at zero
-        shell_thickness = (max_height/n_values) * 1e5 # cm 
-
-        # Make sure watched altitude is in height list:
-        if np.isin(watch_alt,self.height) == False:
-            print()
-            print("ERROR: Watched altitude must be defined in atmospheric model!")
-            print()
-            sys.exit()
-            
-        # Get index for watched volume:
-        watch_index = np.argwhere(self.height==watch_alt)[0]
-        watch_index = int(watch_index)
-
-        # Must define curvature relative to Earth's surface [cm]:
-        r_earth = 6.378e8 
 
         # For watched area:
         watch_inner = r_earth + (watch_alt * 1e5) # cm
@@ -337,12 +336,13 @@ class MakeMassModels:
             # as long as the shell thickness is small.
             f.write("Material MaterialSlice_%s_%s\n" %(str(i),str(i+1)))
             f.write("MaterialSlice_%s_%s.Density %s\n" %(str(i),str(i+1),str(self.density[i])))
-            if self.H_normed[i] != 0:
-                f.write("MaterialSlice_%s_%s.ComponentByAtoms H %s\n" %(str(i),str(i+1),str(self.H_normed[i])))
-            f.write("MaterialSlice_%s_%s.ComponentByAtoms He %s\n" %(str(i),str(i+1),str(self.He_normed[i])))
-            f.write("MaterialSlice_%s_%s.ComponentByAtoms N %s\n" %(str(i),str(i+1),str(self.N_normed[i])))
-            f.write("MaterialSlice_%s_%s.ComponentByAtoms O %s\n" %(str(i),str(i+1),str(self.O_normed[i])))
-            f.write("MaterialSlice_%s_%s.ComponentByAtoms Ar %s\n\n" %(str(i),str(i+1),str(self.Ar_normed[i])))
+            for element, counts in (("H", self.H_normed), ("He", self.He_normed),
+                                    ("N", self.N_normed), ("O", self.O_normed),
+                                    ("Ar", self.Ar_normed)):
+                if counts[i] > 0:
+                    f.write("MaterialSlice_%s_%s.ComponentByAtoms %s %s\n" %
+                            (str(i), str(i+1), element, str(counts[i])))
+            f.write("\n")
 
             # Volume (Box):
             this_int = random.randint(0,10) # set random color per shell for visualization
